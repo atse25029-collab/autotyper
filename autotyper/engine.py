@@ -1,6 +1,6 @@
 """
 AutoTyper Engine: Coordinates typing execution, delays, jitter,
-code editor auto-indent reset, multi-element queues, and emergency stops.
+intelligent Python/Monaco indentation tracking, and emergency stops.
 """
 
 import time
@@ -12,20 +12,21 @@ from typing import List, Callable, Optional
 from autotyper.win_keyboard import (
     type_single_char,
     send_vk_tap,
-    clear_editor_line_indent,
     VK_RETURN,
-    VK_TAB
+    VK_TAB,
+    VK_BACK,
+    VK_ESCAPE,
 )
 
 
 @dataclass
 class AutoTypeConfig:
-    char_delay_ms: float = 18.0          # Delay between keystrokes in milliseconds
-    jitter_percent: float = 20.0         # Random variation in delay (+/- %)
+    char_delay_ms: float = 16.0          # Delay between keystrokes in milliseconds
+    jitter_percent: float = 15.0         # Random variation in delay (+/- %)
     countdown_seconds: float = 3.0       # Delay before typing begins
     play_sound: bool = True              # Audible feedback
-    indent_mode: str = "code_editor"     # "code_editor" (clears Monaco auto-indent) or "raw"
-    line_pause_ms: float = 35.0          # Pause after newline so editor finishes formatting
+    indent_mode: str = "smart_python"    # "smart_python" (Monaco-aware) or "raw"
+    line_pause_ms: float = 25.0          # Pause after newline
     element_mode: str = "single"         # "single", "queue_step", or "auto_tab"
     element_delimiter: str = "\n\n"      # Delimiter for multi-element splitting
     auto_tab_delay_ms: float = 300.0     # Pause between auto-tabbed elements
@@ -36,12 +37,12 @@ class AutoTypeEngine:
         self.config = config or AutoTypeConfig()
         self.queue: List[str] = []
         self.queue_index: int = 0
-        self.state: str = "IDLE"  # "IDLE", "COUNTDOWN", "TYPING", "STOPPED"
+        self.state: str = "IDLE"
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
-        # Callbacks for UI updates
+        # Callbacks
         self.on_status_change: Optional[Callable[[str, str], None]] = None
         self.on_progress: Optional[Callable[[int, int, int, int], None]] = None
         self.on_complete: Optional[Callable[[], None]] = None
@@ -68,10 +69,8 @@ class AutoTypeEngine:
             pass
 
     def load_content(self, text: str, delimiter: Optional[str] = None):
-        """Parse text into elements according to delimiter and update the queue."""
         with self._lock:
             delim = delimiter if delimiter is not None else self.config.element_delimiter
-            # Normalize CRLF to LF
             clean_text = text.replace("\r\n", "\n").replace("\r", "\n")
             if self.config.element_mode in ("queue_step", "auto_tab") and delim:
                 delim_norm = delim.replace("\r\n", "\n").replace("\r", "\n")
@@ -92,10 +91,9 @@ class AutoTypeEngine:
             self.on_queue_updated(self.queue, self.queue_index)
 
     def trigger_start(self, override_countdown: Optional[float] = None, single_next: bool = False):
-        """Start the typing process in a separate background thread."""
         with self._lock:
             if self.state in ("COUNTDOWN", "TYPING"):
-                return  # Already running
+                return
 
             if not self.queue:
                 self._notify_status("IDLE", "Nothing to type (clipboard empty)")
@@ -111,13 +109,11 @@ class AutoTypeEngine:
             self._worker_thread.start()
 
     def stop(self):
-        """Immediately aborts any ongoing countdown or typing."""
         self._stop_event.set()
         self._notify_status("STOPPED", "Emergency stop triggered")
         self._play_beep("stop")
 
     def _run_typing_flow(self, countdown_sec: float, single_next: bool):
-        # 1. Countdown Phase
         if countdown_sec > 0:
             self._notify_status("COUNTDOWN", f"Starting in {countdown_sec:.1f}s... Switch to portal!")
             remaining = countdown_sec
@@ -142,7 +138,6 @@ class AutoTypeEngine:
         self._play_beep("start")
         self._notify_status("TYPING", "Autotyping in progress...")
 
-        # 2. Typing Phase
         try:
             if single_next or self.config.element_mode == "queue_step":
                 if self.queue_index < len(self.queue):
@@ -183,40 +178,68 @@ class AutoTypeEngine:
             self._notify_status("ERROR", f"Typing error: {e}")
 
     def _type_element_content(self, text: str, elem_num: int, total_elems: int):
-        """
-        Types the given text block.
-        If config.indent_mode == 'code_editor':
-          Types line-by-line. On every newline, it sends Enter, waits for the web editor
-          to insert its auto-indentation, immediately clears the auto-indentation using
-          clear_editor_line_indent() (Shift+Home then Backspace), and then types the exact
-          spaces and characters of the line. This completely eliminates the staircase effect!
-        """
         total_chars = len(text)
         base_delay = self.config.char_delay_ms / 1000.0
         jitter = self.config.jitter_percent / 100.0
         char_count = 0
 
-        if self.config.indent_mode == "code_editor":
-            # Code Editor Mode (Monaco / NxtWave / VS Code / LeetCode)
+        if self.config.indent_mode == "smart_python":
+            # Smart Monaco / Python Indentation Engine
             lines = text.split("\n")
+            predicted_editor_indent = 0
+
             for line_idx, line in enumerate(lines):
                 if self._stop_event.is_set():
                     break
 
-                # If not the first line, move down to new line and clear auto-indent
+                raw_line = line.replace("\t", "    ")
+                content = raw_line.lstrip(" ")
+                target_indent = len(raw_line) - len(content)
+
                 if line_idx > 0:
-                    send_vk_tap(VK_RETURN)
-                    # Pause so Monaco/Chrome processes the Enter event
-                    time.sleep(max(0.025, self.config.line_pause_ms / 1000.0))
-                    # Reset cursor to column 0 by wiping auto-indent
-                    clear_editor_line_indent()
+                    # Send Escape to close any lingering autocomplete dropdown
+                    send_vk_tap(VK_ESCAPE)
                     time.sleep(0.005)
+                    # Create new line
+                    send_vk_tap(VK_RETURN)
                     char_count += 1
+                    time.sleep(max(0.015, self.config.line_pause_ms / 1000.0))
+
+                # Handle Blank Line
+                if not content:
                     if self.on_progress:
                         self.on_progress(char_count, total_chars, elem_num, total_elems)
+                    continue
 
-                # Type all characters of this line (including exact spaces)
-                for ch in line:
+                # Calculate indentation difference
+                if line_idx == 0:
+                    # First line: type whatever leading spaces were requested
+                    if target_indent > 0:
+                        for _ in range(target_indent):
+                            type_single_char(" ")
+                            char_count += 1
+                    predicted_editor_indent = target_indent
+                else:
+                    diff = target_indent - predicted_editor_indent
+                    if diff > 0:
+                        # Editor is indented less than target; type the remaining spaces
+                        for _ in range(diff):
+                            type_single_char(" ")
+                            char_count += 1
+                            time.sleep(0.005)
+                    elif diff < 0:
+                        # Editor is indented more than target; unindent using Backspace
+                        # In Monaco / VS Code, 1 Backspace removes 1 indentation level (up to 4 spaces)
+                        backspaces = max(1, (abs(diff) + 3) // 4)
+                        for _ in range(backspaces):
+                            send_vk_tap(VK_BACK)
+                            time.sleep(0.005)
+
+                # Dismiss any autocomplete popup that might have triggered
+                send_vk_tap(VK_ESCAPE)
+
+                # Type line characters
+                for ch in content:
                     if self._stop_event.is_set():
                         break
 
@@ -233,8 +256,14 @@ class AutoTypeEngine:
                         else:
                             delay = base_delay
                         time.sleep(delay)
+
+                # Update predicted editor indent for next line
+                # In Python mode, Monaco adds 4 spaces if the line ends with a colon ':'
+                ends_with_colon = content.rstrip().endswith(":")
+                predicted_editor_indent = target_indent + (4 if ends_with_colon else 0)
+
         else:
-            # Raw mode (simple text areas or inputs without auto-indentation)
+            # Raw mode
             for i, ch in enumerate(text):
                 if self._stop_event.is_set():
                     break
@@ -252,6 +281,6 @@ class AutoTypeEngine:
                         delay = base_delay
 
                     if ch == "\n":
-                        delay += max(0.02, self.config.line_pause_ms / 1000.0)
+                        delay += max(0.015, self.config.line_pause_ms / 1000.0)
 
                     time.sleep(delay)

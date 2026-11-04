@@ -44,12 +44,12 @@ class AutoTyperGUI:
 
         # Engine & Config
         self.config = AutoTypeConfig(
-            char_delay_ms=18.0,
-            jitter_percent=20.0,
+            char_delay_ms=16.0,
+            jitter_percent=15.0,
             countdown_seconds=3.0,
             play_sound=True,
-            indent_mode="code_editor",
-            line_pause_ms=35.0
+            indent_mode="smart_python",
+            line_pause_ms=25.0
         )
         self.engine = AutoTypeEngine(self.config)
         self.hotkey_mgr = HotkeyManager(
@@ -538,7 +538,7 @@ class AutoTyperGUI:
         self.config.jitter_percent = jitter
         self.config.countdown_seconds = countdown
         self.config.play_sound = self.var_sound.get()
-        self.config.indent_mode = "code_editor" if self.var_code_mode.get() else "raw"
+        self.config.indent_mode = "smart_python" if self.var_code_mode.get() else "raw"
         self.config.line_pause_ms = self.var_line_pause.get()
 
     def _update_element_mode(self):
