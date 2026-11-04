@@ -1,24 +1,31 @@
 """
 AutoTyper Engine: Coordinates typing execution, delays, jitter,
-multi-element queues, auto-indent handling, and emergency stops.
+code editor auto-indent reset, multi-element queues, and emergency stops.
 """
 
 import time
 import random
 import threading
 import winsound
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Callable, Optional
-from autotyper.win_keyboard import type_single_char, send_vk_tap, VK_TAB
+from autotyper.win_keyboard import (
+    type_single_char,
+    send_vk_tap,
+    clear_editor_line_indent,
+    VK_RETURN,
+    VK_TAB
+)
 
 
 @dataclass
 class AutoTypeConfig:
-    char_delay_ms: float = 20.0          # Delay between keystrokes in milliseconds
-    jitter_percent: float = 25.0         # Random variation in delay (+/- %)
+    char_delay_ms: float = 18.0          # Delay between keystrokes in milliseconds
+    jitter_percent: float = 20.0         # Random variation in delay (+/- %)
     countdown_seconds: float = 3.0       # Delay before typing begins
     play_sound: bool = True              # Audible feedback
-    auto_indent_mode: str = "raw"        # "raw" or "strip_indent"
+    indent_mode: str = "code_editor"     # "code_editor" (clears Monaco auto-indent) or "raw"
+    line_pause_ms: float = 35.0          # Pause after newline so editor finishes formatting
     element_mode: str = "single"         # "single", "queue_step", or "auto_tab"
     element_delimiter: str = "\n\n"      # Delimiter for multi-element splitting
     auto_tab_delay_ms: float = 300.0     # Pause between auto-tabbed elements
@@ -64,13 +71,14 @@ class AutoTypeEngine:
         """Parse text into elements according to delimiter and update the queue."""
         with self._lock:
             delim = delimiter if delimiter is not None else self.config.element_delimiter
+            # Normalize CRLF to LF
+            clean_text = text.replace("\r\n", "\n").replace("\r", "\n")
             if self.config.element_mode in ("queue_step", "auto_tab") and delim:
-                # Split content into distinct elements
-                raw_parts = text.split(delim)
-                # Keep elements clean but don't discard empty unless all are empty
-                self.queue = [p for p in raw_parts if p.strip()] or [text]
+                delim_norm = delim.replace("\r\n", "\n").replace("\r", "\n")
+                raw_parts = clean_text.split(delim_norm)
+                self.queue = [p for p in raw_parts if p.strip()] or [clean_text]
             else:
-                self.queue = [text] if text else []
+                self.queue = [clean_text] if clean_text else []
             self.queue_index = 0
 
         if self.on_queue_updated:
@@ -137,36 +145,32 @@ class AutoTypeEngine:
         # 2. Typing Phase
         try:
             if single_next or self.config.element_mode == "queue_step":
-                # Type only the current element from the queue
                 if self.queue_index < len(self.queue):
                     element = self.queue[self.queue_index]
-                    self._type_element_text(element, self.queue_index + 1, len(self.queue))
+                    self._type_element_content(element, self.queue_index + 1, len(self.queue))
                     with self._lock:
                         self.queue_index += 1
                     if self.on_queue_updated:
                         self.on_queue_updated(self.queue, self.queue_index)
             elif self.config.element_mode == "auto_tab":
-                # Type all elements sequentially with Tab in between
                 total_elems = len(self.queue)
                 for idx in range(self.queue_index, total_elems):
                     if self._stop_event.is_set():
                         break
                     element = self.queue[idx]
-                    self._type_element_text(element, idx + 1, total_elems)
+                    self._type_element_content(element, idx + 1, total_elems)
                     with self._lock:
                         self.queue_index = idx + 1
                     if self.on_queue_updated:
                         self.on_queue_updated(self.queue, self.queue_index)
 
-                    # If not the last element, press TAB to navigate to next input field
                     if idx < total_elems - 1 and not self._stop_event.is_set():
                         time.sleep(self.config.auto_tab_delay_ms / 1000.0)
                         send_vk_tap(VK_TAB)
                         time.sleep(0.1)
             else:
-                # "single" mode: Type entire first element
                 element = self.queue[0] if self.queue else ""
-                self._type_element_text(element, 1, 1)
+                self._type_element_content(element, 1, 1)
 
             if not self._stop_event.is_set():
                 self._notify_status("IDLE", "Typing completed successfully!")
@@ -178,46 +182,76 @@ class AutoTypeEngine:
         except Exception as e:
             self._notify_status("ERROR", f"Typing error: {e}")
 
-    def _type_element_text(self, text: str, elem_num: int, total_elems: int):
-        # Format text if auto-indent handling is activated
-        if self.config.auto_indent_mode == "strip_indent":
-            # For code editors that automatically indent subsequent lines:
-            # Strip leading whitespace on lines after the first
-            lines = text.splitlines(keepends=True)
-            formatted_lines = []
-            for i, line in enumerate(lines):
-                if i == 0:
-                    formatted_lines.append(line)
-                else:
-                    # Strip leading spaces/tabs on subsequent lines
-                    formatted_lines.append(line.lstrip(" \t"))
-            text = "".join(formatted_lines)
-
+    def _type_element_content(self, text: str, elem_num: int, total_elems: int):
+        """
+        Types the given text block.
+        If config.indent_mode == 'code_editor':
+          Types line-by-line. On every newline, it sends Enter, waits for the web editor
+          to insert its auto-indentation, immediately clears the auto-indentation using
+          clear_editor_line_indent() (Shift+Home then Backspace), and then types the exact
+          spaces and characters of the line. This completely eliminates the staircase effect!
+        """
         total_chars = len(text)
         base_delay = self.config.char_delay_ms / 1000.0
         jitter = self.config.jitter_percent / 100.0
+        char_count = 0
 
-        for i, ch in enumerate(text):
-            if self._stop_event.is_set():
-                break
+        if self.config.indent_mode == "code_editor":
+            # Code Editor Mode (Monaco / NxtWave / VS Code / LeetCode)
+            lines = text.split("\n")
+            for line_idx, line in enumerate(lines):
+                if self._stop_event.is_set():
+                    break
 
-            # Send the keystroke
-            type_single_char(ch)
+                # If not the first line, move down to new line and clear auto-indent
+                if line_idx > 0:
+                    send_vk_tap(VK_RETURN)
+                    # Pause so Monaco/Chrome processes the Enter event
+                    time.sleep(max(0.025, self.config.line_pause_ms / 1000.0))
+                    # Reset cursor to column 0 by wiping auto-indent
+                    clear_editor_line_indent()
+                    time.sleep(0.005)
+                    char_count += 1
+                    if self.on_progress:
+                        self.on_progress(char_count, total_chars, elem_num, total_elems)
 
-            # Report progress
-            if self.on_progress and (i % 5 == 0 or i == total_chars - 1):
-                self.on_progress(i + 1, total_chars, elem_num, total_elems)
+                # Type all characters of this line (including exact spaces)
+                for ch in line:
+                    if self._stop_event.is_set():
+                        break
 
-            # Apply delay with natural jitter
-            if base_delay > 0:
-                if jitter > 0:
-                    variation = random.uniform(-jitter, jitter)
-                    delay = max(0.001, base_delay * (1.0 + variation))
-                else:
-                    delay = base_delay
+                    type_single_char(ch)
+                    char_count += 1
 
-                # Extra realistic pause after punctuation or newlines
-                if ch in ("\n", ". ", ";\n", "}\n"):
-                    delay += base_delay * 1.5
+                    if self.on_progress and (char_count % 5 == 0 or char_count == total_chars):
+                        self.on_progress(char_count, total_chars, elem_num, total_elems)
 
-                time.sleep(delay)
+                    if base_delay > 0:
+                        if jitter > 0:
+                            variation = random.uniform(-jitter, jitter)
+                            delay = max(0.001, base_delay * (1.0 + variation))
+                        else:
+                            delay = base_delay
+                        time.sleep(delay)
+        else:
+            # Raw mode (simple text areas or inputs without auto-indentation)
+            for i, ch in enumerate(text):
+                if self._stop_event.is_set():
+                    break
+
+                type_single_char(ch)
+
+                if self.on_progress and (i % 5 == 0 or i == total_chars - 1):
+                    self.on_progress(i + 1, total_chars, elem_num, total_elems)
+
+                if base_delay > 0:
+                    if jitter > 0:
+                        variation = random.uniform(-jitter, jitter)
+                        delay = max(0.001, base_delay * (1.0 + variation))
+                    else:
+                        delay = base_delay
+
+                    if ch == "\n":
+                        delay += max(0.02, self.config.line_pause_ms / 1000.0)
+
+                    time.sleep(delay)

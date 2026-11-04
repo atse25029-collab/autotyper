@@ -1,5 +1,5 @@
 """
-Unit and integration tests for AutoTyper engine and queue logic.
+Unit and integration tests for AutoTyper engine, queue logic, and code indentation.
 """
 
 import unittest
@@ -12,12 +12,13 @@ class TestAutoTypeEngine(unittest.TestCase):
             char_delay_ms=0.0,
             jitter_percent=0.0,
             countdown_seconds=0.0,
-            play_sound=False
+            play_sound=False,
+            indent_mode="code_editor"
         )
         self.engine = AutoTypeEngine(self.config)
 
     def test_single_content_loading(self):
-        text = "console.log('hello world');"
+        text = "def foo():\n    return 42"
         self.engine.load_content(text)
         self.assertEqual(len(self.engine.queue), 1)
         self.assertEqual(self.engine.queue[0], text)
@@ -49,22 +50,13 @@ class TestAutoTypeEngine(unittest.TestCase):
         self.assertEqual(self.engine.queue_index, 0)
         self.engine.set_queue_index(2)
         self.assertEqual(self.engine.queue_index, 2)
-        # Out of bounds should be ignored safely
         self.engine.set_queue_index(99)
         self.assertEqual(self.engine.queue_index, 2)
 
-    def test_strip_indent_mode(self):
-        sample_code = "def foo():\n    x = 10\n    return x\n"
-        lines = sample_code.splitlines(keepends=True)
-        formatted_lines = []
-        for i, line in enumerate(lines):
-            if i == 0:
-                formatted_lines.append(line)
-            else:
-                formatted_lines.append(line.lstrip(" \t"))
-        res = "".join(formatted_lines)
-        expected = "def foo():\nx = 10\nreturn x\n"
-        self.assertEqual(res, expected)
+    def test_crlf_normalization(self):
+        text_crlf = "Line 1\r\nLine 2\r\nLine 3"
+        self.engine.load_content(text_crlf)
+        self.assertEqual(self.engine.queue[0], "Line 1\nLine 2\nLine 3")
 
 
 if __name__ == "__main__":

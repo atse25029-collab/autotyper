@@ -1,7 +1,7 @@
 """
 Modern, responsive GUI for AutoTyper built with Tkinter.
 Includes clipboard preview, multi-element queue management, speed/jitter controls,
-smart auto-indent toggles, global hotkey display, and a safe built-in test scratchpad.
+code editor auto-indent reset (anti-staircase), global hotkeys, and test scratchpad.
 """
 
 import tkinter as tk
@@ -18,8 +18,8 @@ class AutoTyperGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("AutoTyper Pro - Keystroke Portal Bypass")
-        self.root.geometry("740x800")
-        self.root.minsize(680, 720)
+        self.root.geometry("740x840")
+        self.root.minsize(680, 740)
 
         # Apply dark aesthetic theme
         self.colors = {
@@ -43,7 +43,14 @@ class AutoTyperGUI:
         self.root.configure(bg=self.colors["bg"])
 
         # Engine & Config
-        self.config = AutoTypeConfig()
+        self.config = AutoTypeConfig(
+            char_delay_ms=18.0,
+            jitter_percent=20.0,
+            countdown_seconds=3.0,
+            play_sound=True,
+            indent_mode="code_editor",
+            line_pause_ms=35.0
+        )
         self.engine = AutoTypeEngine(self.config)
         self.hotkey_mgr = HotkeyManager(
             on_trigger=self._on_hotkey_trigger,
@@ -56,13 +63,14 @@ class AutoTyperGUI:
         # State Variables
         self.var_status_badge = tk.StringVar(value="READY")
         self.var_status_detail = tk.StringVar(value="Press F8 or click Start to begin typing")
-        self.var_char_delay = tk.DoubleVar(value=20.0)
-        self.var_jitter = tk.DoubleVar(value=25.0)
+        self.var_char_delay = tk.DoubleVar(value=18.0)
+        self.var_jitter = tk.DoubleVar(value=20.0)
         self.var_countdown = tk.DoubleVar(value=3.0)
+        self.var_line_pause = tk.DoubleVar(value=35.0)
         self.var_sound = tk.BooleanVar(value=True)
         self.var_ontop = tk.BooleanVar(value=False)
         self.var_autosync = tk.BooleanVar(value=True)
-        self.var_strip_indent = tk.BooleanVar(value=False)
+        self.var_code_mode = tk.BooleanVar(value=True)  # ON by default for NxtWave/Monaco!
         self.var_element_mode = tk.StringVar(value="single")  # single, queue_step, auto_tab
         self.var_delimiter = tk.StringVar(value="\\n\\n")
 
@@ -89,46 +97,14 @@ class AutoTyperGUI:
         style = ttk.Style()
         style.theme_use("clam")
 
-        # Global styling overrides
         style.configure(".", background=self.colors["card"], foreground=self.colors["text"])
         style.configure("TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.configure("Sub.TLabel", foreground=self.colors["text_dim"], font=("Segoe UI", 8))
         style.configure("Header.TLabel", font=("Segoe UI", 12, "bold"), foreground=self.colors["accent"])
         style.configure("Card.TFrame", background=self.colors["card"])
         style.configure("Inner.TFrame", background=self.colors["card_sub"])
-
-        style.configure(
-            "Start.TButton",
-            font=("Segoe UI", 10, "bold"),
-            background="#2e7d32",
-            foreground="#ffffff",
-            borderwidth=0,
-            padding=8
-        )
-        style.map("Start.TButton", background=[("active", "#388e3c")])
-
-        style.configure(
-            "Stop.TButton",
-            font=("Segoe UI", 10, "bold"),
-            background="#c62828",
-            foreground="#ffffff",
-            borderwidth=0,
-            padding=8
-        )
-        style.map("Stop.TButton", background=[("active", "#d32f2f")])
-
-        style.configure(
-            "TCheckbutton",
-            background=self.colors["card"],
-            foreground=self.colors["text"],
-            font=("Segoe UI", 9)
-        )
-        style.configure(
-            "TRadiobutton",
-            background=self.colors["card"],
-            foreground=self.colors["text"],
-            font=("Segoe UI", 9)
-        )
+        style.configure("TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
+        style.configure("TRadiobutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.configure("TProgressbar", thickness=10, troughcolor=self.colors["card_sub"], background=self.colors["accent"])
 
     def _build_ui(self):
@@ -136,8 +112,8 @@ class AutoTyperGUI:
         main_container.pack(fill=tk.BOTH, expand=True)
 
         # 1. TOP HEADER & HOTKEY BADGE
-        header_frame = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=10, relief=tk.FLAT)
-        header_frame.pack(fill=tk.X, pady=(0, 10))
+        header_frame = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=10)
+        header_frame.pack(fill=tk.X, pady=(0, 8))
 
         title_label = tk.Label(
             header_frame,
@@ -150,14 +126,13 @@ class AutoTyperGUI:
 
         sub_title = tk.Label(
             header_frame,
-            text="Bypass disabled paste by simulating direct keyboard typing",
+            text="Hardware keystroke simulator with anti-staircase code indentation",
             font=("Segoe UI", 8),
             fg=self.colors["text_dim"],
             bg=self.colors["card"]
         )
         sub_title.pack(side=tk.LEFT, padx=(8, 0), pady=(4, 0))
 
-        # Hotkeys pill
         hotkey_pill = tk.Label(
             header_frame,
             text="[ F8: Start ]  [ F9: Stop ]",
@@ -170,8 +145,8 @@ class AutoTyperGUI:
         hotkey_pill.pack(side=tk.RIGHT)
 
         # 2. STATUS & PROGRESS CARD
-        status_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=10)
-        status_card.pack(fill=tk.X, pady=(0, 10))
+        status_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=8)
+        status_card.pack(fill=tk.X, pady=(0, 8))
 
         status_header = tk.Frame(status_card, bg=self.colors["card"])
         status_header.pack(fill=tk.X)
@@ -180,7 +155,7 @@ class AutoTyperGUI:
             status_header,
             textvariable=self.var_status_badge,
             font=("Segoe UI", 9, "bold"),
-            fg="#181825",
+            fg="#ffffff",
             bg=self.colors["badge_idle"],
             padx=8,
             pady=2
@@ -205,13 +180,12 @@ class AutoTyperGUI:
         )
         self.lbl_queue_indicator.pack(side=tk.RIGHT)
 
-        # Progress bar
         self.progress_bar = ttk.Progressbar(status_card, style="TProgressbar", orient=tk.HORIZONTAL, mode="determinate")
-        self.progress_bar.pack(fill=tk.X, pady=(8, 0))
+        self.progress_bar.pack(fill=tk.X, pady=(6, 0))
 
         # 3. CONTENT & CLIPBOARD MONITOR CARD
-        content_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=10)
-        content_card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        content_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=8)
+        content_card.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         content_hdr = tk.Frame(content_card, bg=self.colors["card"])
         content_hdr.pack(fill=tk.X, pady=(0, 6))
@@ -235,7 +209,7 @@ class AutoTyperGUI:
 
         chk_autosync = tk.Checkbutton(
             content_hdr,
-            text="Auto-sync Clipboard",
+            text="Auto-sync Clipboard (Ctrl+C)",
             variable=self.var_autosync,
             font=("Segoe UI", 8),
             bg=self.colors["card"],
@@ -261,7 +235,6 @@ class AutoTyperGUI:
         )
         btn_sync.pack(side=tk.RIGHT, padx=(0, 8))
 
-        # Text Editor / Display
         text_container = tk.Frame(content_card, bg=self.colors["card_sub"])
         text_container.pack(fill=tk.BOTH, expand=True)
 
@@ -284,71 +257,95 @@ class AutoTyperGUI:
         self.txt_content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.txt_content.bind("<KeyRelease>", self._on_text_modified)
 
-        # 4. ELEMENT MODE & FORM AUTOMATION ("FOR EACH ELEMENT")
-        elem_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=10)
-        elem_card.pack(fill=tk.X, pady=(0, 10))
+        # 4. CRITICAL ANTI-STAIRCASE / CODE EDITOR SETTINGS CARD
+        code_card = tk.Frame(main_container, bg=self.colors["card_sub"], padx=12, pady=8, highlightbackground=self.colors["accent"], highlightthickness=1)
+        code_card.pack(fill=tk.X, pady=(0, 8))
+
+        code_hdr = tk.Frame(code_card, bg=self.colors["card_sub"])
+        code_hdr.pack(fill=tk.X)
+
+        chk_code_mode = tk.Checkbutton(
+            code_hdr,
+            text="🛡️ Code Editor Anti-Staircase Mode (RECOMMENDED for NxtWave, Monaco, LeetCode)",
+            variable=self.var_code_mode,
+            command=self._update_config_values,
+            font=("Segoe UI", 9, "bold"),
+            fg="#a6e3a1",
+            bg=self.colors["card_sub"],
+            activebackground=self.colors["card_sub"],
+            selectcolor=self.colors["card"]
+        )
+        chk_code_mode.pack(side=tk.LEFT)
+
+        lbl_code_desc = tk.Label(
+            code_card,
+            text="Automatically resets cursor to column 0 on newlines so the portal's auto-indentation doesn't push code to the right.",
+            font=("Segoe UI", 8),
+            fg=self.colors["text_dim"],
+            bg=self.colors["card_sub"]
+        )
+        lbl_code_desc.pack(anchor="w", pady=(2, 0))
+
+        # 5. ELEMENT AUTOMATION MODE ("FOR EACH ELEMENT")
+        elem_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=8)
+        elem_card.pack(fill=tk.X, pady=(0, 8))
 
         elem_hdr = tk.Frame(elem_card, bg=self.colors["card"])
-        elem_hdr.pack(fill=tk.X, pady=(0, 6))
+        elem_hdr.pack(fill=tk.X, pady=(0, 4))
 
         tk.Label(
             elem_hdr,
-            text="Element Automation Mode (For multiple inputs / question forms)",
+            text="Element Mode (For multi-part questions or separate form inputs)",
             font=("Segoe UI", 9, "bold"),
             fg=self.colors["text"],
             bg=self.colors["card"]
         ).pack(side=tk.LEFT)
 
-        # Radio options for Element Mode
         modes_frame = tk.Frame(elem_card, bg=self.colors["card"])
         modes_frame.pack(fill=tk.X)
 
         tk.Radiobutton(
             modes_frame,
-            text="Single (Type all into focused field)",
+            text="Single (Type all into current box)",
             variable=self.var_element_mode,
             value="single",
             command=self._update_element_mode,
             bg=self.colors["card"],
             fg=self.colors["text"],
             selectcolor=self.colors["card_sub"],
-            activebackground=self.colors["card"],
             font=("Segoe UI", 8)
         ).pack(side=tk.LEFT, padx=(0, 15))
 
         tk.Radiobutton(
             modes_frame,
-            text="Step-by-Step (Press F8 for each element)",
+            text="Step-by-Step (Press F8 for next element)",
             variable=self.var_element_mode,
             value="queue_step",
             command=self._update_element_mode,
             bg=self.colors["card"],
             fg=self.colors["text"],
             selectcolor=self.colors["card_sub"],
-            activebackground=self.colors["card"],
             font=("Segoe UI", 8)
         ).pack(side=tk.LEFT, padx=(0, 15))
 
         tk.Radiobutton(
             modes_frame,
-            text="Auto-Tab (Type element -> Press Tab -> Type next)",
+            text="Auto-Tab (Type element -> Tab -> Type next)",
             variable=self.var_element_mode,
             value="auto_tab",
             command=self._update_element_mode,
             bg=self.colors["card"],
             fg=self.colors["text"],
             selectcolor=self.colors["card_sub"],
-            activebackground=self.colors["card"],
             font=("Segoe UI", 8)
         ).pack(side=tk.LEFT)
 
-        # Delimiter selector for multi-element
         delim_frame = tk.Frame(elem_card, bg=self.colors["card"])
         delim_frame.pack(fill=tk.X, pady=(6, 0))
 
         tk.Label(
             delim_frame,
-            text="Element Separator:",
+            text="Separator:",
             font=("Segoe UI", 8),
             fg=self.colors["text_dim"],
             bg=self.colors["card"]
@@ -366,7 +363,7 @@ class AutoTyperGUI:
 
         btn_reset_queue = tk.Button(
             delim_frame,
-            text="↺ Reset to Element 1",
+            text="↺ Reset Queue to Start",
             command=self._reset_queue_index,
             font=("Segoe UI", 8),
             bg=self.colors["card_sub"],
@@ -377,19 +374,19 @@ class AutoTyperGUI:
         )
         btn_reset_queue.pack(side=tk.LEFT)
 
-        # 5. CONFIGURATION CONTROLS (SPEED, JITTER, COUNTDOWN, OPTIONS)
-        config_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=10)
-        config_card.pack(fill=tk.X, pady=(0, 10))
+        # 6. CONFIGURATION CONTROLS (SPEED, JITTER, COUNTDOWN, OPTIONS)
+        config_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=8)
+        config_card.pack(fill=tk.X, pady=(0, 8))
 
         cfg_grid = tk.Frame(config_card, bg=self.colors["card"])
         cfg_grid.pack(fill=tk.X)
 
-        # Row 1: Typing Speed Slider
-        tk.Label(cfg_grid, text="Typing Delay (ms/char):", bg=self.colors["card"]).grid(row=0, column=0, sticky="w", pady=3)
+        # Typing Speed Slider
+        tk.Label(cfg_grid, text="Typing Delay (ms/char):", bg=self.colors["card"]).grid(row=0, column=0, sticky="w", pady=2)
         scale_speed = tk.Scale(
             cfg_grid,
             from_=0,
-            to=100,
+            to=80,
             orient=tk.HORIZONTAL,
             variable=self.var_char_delay,
             bg=self.colors["card"],
@@ -398,12 +395,12 @@ class AutoTyperGUI:
             highlightthickness=0,
             command=lambda v: self._update_config_values()
         )
-        scale_speed.grid(row=0, column=1, sticky="ew", padx=8, pady=3)
-        self.lbl_speed_val = tk.Label(cfg_grid, text="20 ms (~60 WPM)", bg=self.colors["card"], width=16, anchor="w")
-        self.lbl_speed_val.grid(row=0, column=2, sticky="w", pady=3)
+        scale_speed.grid(row=0, column=1, sticky="ew", padx=8, pady=2)
+        self.lbl_speed_val = tk.Label(cfg_grid, text="18 ms (~65 WPM)", bg=self.colors["card"], width=16, anchor="w")
+        self.lbl_speed_val.grid(row=0, column=2, sticky="w", pady=2)
 
-        # Row 2: Human Jitter
-        tk.Label(cfg_grid, text="Human Variation Jitter:", bg=self.colors["card"]).grid(row=1, column=0, sticky="w", pady=3)
+        # Human Jitter Slider
+        tk.Label(cfg_grid, text="Human Variation Jitter:", bg=self.colors["card"]).grid(row=1, column=0, sticky="w", pady=2)
         scale_jitter = tk.Scale(
             cfg_grid,
             from_=0,
@@ -416,12 +413,12 @@ class AutoTyperGUI:
             highlightthickness=0,
             command=lambda v: self._update_config_values()
         )
-        scale_jitter.grid(row=1, column=1, sticky="ew", padx=8, pady=3)
-        self.lbl_jitter_val = tk.Label(cfg_grid, text="±25%", bg=self.colors["card"], width=16, anchor="w")
-        self.lbl_jitter_val.grid(row=1, column=2, sticky="w", pady=3)
+        scale_jitter.grid(row=1, column=1, sticky="ew", padx=8, pady=2)
+        self.lbl_jitter_val = tk.Label(cfg_grid, text="±20%", bg=self.colors["card"], width=16, anchor="w")
+        self.lbl_jitter_val.grid(row=1, column=2, sticky="w", pady=2)
 
-        # Row 3: Countdown
-        tk.Label(cfg_grid, text="Countdown Grace Delay:", bg=self.colors["card"]).grid(row=2, column=0, sticky="w", pady=3)
+        # Countdown Slider
+        tk.Label(cfg_grid, text="Countdown Grace Delay:", bg=self.colors["card"]).grid(row=2, column=0, sticky="w", pady=2)
         scale_countdown = tk.Scale(
             cfg_grid,
             from_=0.5,
@@ -435,26 +432,14 @@ class AutoTyperGUI:
             highlightthickness=0,
             command=lambda v: self._update_config_values()
         )
-        scale_countdown.grid(row=2, column=1, sticky="ew", padx=8, pady=3)
+        scale_countdown.grid(row=2, column=1, sticky="ew", padx=8, pady=2)
         self.lbl_countdown_val = tk.Label(cfg_grid, text="3.0 sec", bg=self.colors["card"], width=16, anchor="w")
-        self.lbl_countdown_val.grid(row=2, column=2, sticky="w", pady=3)
+        self.lbl_countdown_val.grid(row=2, column=2, sticky="w", pady=2)
 
         cfg_grid.columnconfigure(1, weight=1)
 
-        # Checkbox toggles row
         toggles_frame = tk.Frame(config_card, bg=self.colors["card"])
-        toggles_frame.pack(fill=tk.X, pady=(8, 0))
-
-        tk.Checkbutton(
-            toggles_frame,
-            text="Smart Code Indent (trim leading spaces for auto-indenting editors)",
-            variable=self.var_strip_indent,
-            command=self._update_config_values,
-            bg=self.colors["card"],
-            fg=self.colors["text"],
-            activebackground=self.colors["card"],
-            selectcolor=self.colors["card_sub"]
-        ).pack(side=tk.LEFT, padx=(0, 15))
+        toggles_frame.pack(fill=tk.X, pady=(6, 0))
 
         tk.Checkbutton(
             toggles_frame,
@@ -465,7 +450,7 @@ class AutoTyperGUI:
             fg=self.colors["text"],
             activebackground=self.colors["card"],
             selectcolor=self.colors["card_sub"]
-        ).pack(side=tk.LEFT, padx=(0, 15))
+        ).pack(side=tk.LEFT, padx=(0, 18))
 
         tk.Checkbutton(
             toggles_frame,
@@ -478,12 +463,12 @@ class AutoTyperGUI:
             selectcolor=self.colors["card_sub"]
         ).pack(side=tk.LEFT)
 
-        # 6. BUILT-IN TEST SCRATCHPAD
-        test_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=8)
-        test_card.pack(fill=tk.X, pady=(0, 10))
+        # 7. BUILT-IN TEST SCRATCHPAD
+        test_card = tk.Frame(main_container, bg=self.colors["card"], padx=12, pady=6)
+        test_card.pack(fill=tk.X, pady=(0, 8))
 
         test_hdr = tk.Frame(test_card, bg=self.colors["card"])
-        test_hdr.pack(fill=tk.X, pady=(0, 4))
+        test_hdr.pack(fill=tk.X, pady=(0, 2))
         tk.Label(
             test_hdr,
             text="🧪 Built-in Test Scratchpad (Click inside & press F8 to test safely)",
@@ -500,9 +485,9 @@ class AutoTyperGUI:
             insertbackground=self.colors["accent"],
             relief=tk.FLAT
         )
-        self.txt_test_scratchpad.pack(fill=tk.X, ipady=4)
+        self.txt_test_scratchpad.pack(fill=tk.X, ipady=3)
 
-        # 7. ACTION BUTTONS (START / STOP)
+        # 8. ACTION BUTTONS (START / STOP)
         btn_bar = tk.Frame(main_container, bg=self.colors["bg"])
         btn_bar.pack(fill=tk.X)
 
@@ -516,7 +501,7 @@ class AutoTyperGUI:
             activebackground="#388e3c",
             activeforeground="#ffffff",
             relief=tk.FLAT,
-            pady=8
+            pady=7
         )
         self.btn_start.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
 
@@ -530,7 +515,7 @@ class AutoTyperGUI:
             activebackground="#d32f2f",
             activeforeground="#ffffff",
             relief=tk.FLAT,
-            pady=8
+            pady=7
         )
         self.btn_stop.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(8, 0))
 
@@ -553,7 +538,8 @@ class AutoTyperGUI:
         self.config.jitter_percent = jitter
         self.config.countdown_seconds = countdown
         self.config.play_sound = self.var_sound.get()
-        self.config.auto_indent_mode = "strip_indent" if self.var_strip_indent.get() else "raw"
+        self.config.indent_mode = "code_editor" if self.var_code_mode.get() else "raw"
+        self.config.line_pause_ms = self.var_line_pause.get()
 
     def _update_element_mode(self):
         self.config.element_mode = self.var_element_mode.get()
@@ -636,7 +622,6 @@ class AutoTyperGUI:
         self.engine.stop()
 
     def _on_hotkey_trigger(self):
-        # Triggered via F8 or Ctrl+Alt+V
         self.root.after(0, self._handle_hotkey_action)
 
     def _handle_hotkey_action(self):
@@ -644,13 +629,10 @@ class AutoTyperGUI:
             return
         self._update_config_values()
         self._reload_engine_content()
-        # For hotkey, if user is already focused on their target window,
-        # a smaller grace countdown (e.g. 0.5s) allows modifiers to release cleanly
         countdown = 0.5 if self.var_countdown.get() < 0.5 else self.var_countdown.get()
         self.engine.trigger_start(override_countdown=countdown)
 
     def _on_hotkey_stop(self):
-        # Triggered via F9
         self.root.after(0, self.engine.stop)
 
     # ------------------ ENGINE CALLBACKS ------------------
